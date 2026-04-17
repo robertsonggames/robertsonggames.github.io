@@ -75,6 +75,11 @@ class Enemy {
       if (trimmed === 'Return' || trimmed === 'Repeat') {
         return { angle: 0, speed: 0, stop: trimmed };
       }
+      // Wait N: 이동 중 정지 (예: "Wait 2")
+      const waitMatch = trimmed.match(/^Wait\s+(\d+\.?\d*)$/i);
+      if (waitMatch) {
+        return { type: 'Wait', duration: parseFloat(waitMatch[1]) };
+      }
       // 새 구분자: ',' (이전 ';'도 호환)
       const parts = trimmed.split(/\s*[,;]\s*/).map(s => s.trim());
       // "속도, Repeat" 또는 "속도, Return" 형식 (예: 160, Repeat)
@@ -125,6 +130,21 @@ class Enemy {
       return;
     }
     const step = this.moveSteps[this.currentMoveIndex];
+
+    // Wait 스텝: 정지 후 카운트다운
+    if (step.type === 'Wait') {
+      this.vx = 0;
+      this.vy = 0;
+      this.waitTimer = step.duration;
+      this.isWaiting = true;
+      // 웨이포인트 기록
+      if (this.waypoints.length <= this.currentMoveIndex) {
+        this.waypoints.push({ x: this.x, y: this.y });
+      }
+      return;
+    }
+
+    this.isWaiting = false;
     const dir = Utils.dirFromAngle(step.angle);
     this.vx = dir.x * step.speed * ENEMY_SPEED_SCALE;
     this.vy = dir.y * step.speed * ENEMY_SPEED_SCALE;
@@ -322,9 +342,26 @@ class Enemy {
     }
     // 일반 이동
     else {
-      this.x += this.vx * dt;
-      this.y += this.vy * dt;
-      this._checkStopCondition();
+      // Wait 스텝 처리: 정지 후 카운트다운
+      if (this.isWaiting) {
+        this.waitTimer -= dt;
+        if (this.waitTimer <= 0) {
+          this.isWaiting = false;
+          this.currentMoveIndex++;
+          if (this.currentMoveIndex < this.moveSteps.length) {
+            const nextStop = this.moveSteps[this.currentMoveIndex].stop;
+            if (nextStop === 'Return') this._startReturn();
+            else if (nextStop === 'Repeat') this._startRepeat();
+            else this._applyCurrentMove();
+          } else {
+            this.alive = false;
+          }
+        }
+      } else {
+        this.x += this.vx * dt;
+        this.y += this.vy * dt;
+        this._checkStopCondition();
+      }
     }
 
     // 방향 설정
@@ -354,6 +391,10 @@ class Enemy {
     if (this.currentMoveIndex >= this.moveSteps.length) return;
 
     const step = this.moveSteps[this.currentMoveIndex];
+
+    // Wait 스텝: 카운트다운 처리는 update에서 진행
+    if (step.type === 'Wait') return;
+
     const stop = step.stop;
     let shouldAdvance = false;
 
@@ -438,16 +479,19 @@ class Enemy {
     const hasWait = this.bulletSequence.some(s => s.type === 'wait');
 
     if (!hasWait) {
-      // 기존 동작: 각 패턴이 독립적으로 쿨타임 기반 발사
+      // 모든 패턴을 동기화하여 동시에 발사 (첫 패턴의 쿨타임 사용)
+      const allPatterns = [];
       for (const seq of this.bulletSequence) {
-        if (seq.type !== 'fire') continue;
-        for (const pattern of seq.patterns) {
-          if (!pattern._timer) pattern._timer = 0;
-          pattern._timer += dt;
-          if (pattern._timer >= pattern.coolTime) {
-            pattern._timer -= pattern.coolTime;
-            this._firePattern(pattern, playerRef, bulletManager);
-          }
+        if (seq.type === 'fire') allPatterns.push(...seq.patterns);
+      }
+      if (allPatterns.length === 0) return;
+      const sharedCoolTime = allPatterns[0].coolTime;
+      if (this._sharedTimer === undefined) this._sharedTimer = 0;
+      this._sharedTimer += dt;
+      if (this._sharedTimer >= sharedCoolTime) {
+        this._sharedTimer -= sharedCoolTime;
+        for (const pattern of allPatterns) {
+          this._firePattern(pattern, playerRef, bulletManager);
         }
       }
       return;
